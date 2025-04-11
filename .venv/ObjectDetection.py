@@ -48,8 +48,12 @@ if __name__ == '__main__':
 
     while True:
         success, img = cap.read()
-        results,objectInfo = getObjects(img,object==['person'])
-        #print(objectInfo)
-        cv2.imshow("lena", img)
-        cv2.waitKey(0)
+        results, objectInfo = getObjects(img, objects=['person'])
+        cv2.imshow("Detection", img)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+
 
