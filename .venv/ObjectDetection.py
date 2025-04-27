@@ -1,6 +1,8 @@
 # Importing necessary libraries
 import cv2
 import numpy as np
+import serial
+import time
 
 # Setting the detection threshold
 thres = 0.45   # Threshold to detect object (confidence level)
@@ -13,8 +15,14 @@ classNames= []
 classFile = 'coco.names'
 
 # Reading the class names from the file
-with open(classFile,'rt') as f:
-    classNames = f.read().rstrip('\n').split('\n')
+try:
+    with open(classFile,'rt') as f:
+        classNames = f.read().rstrip('\n').split('\n')
+    print(f"Successfully loaded {len(classNames)} class names from {classFile}")
+except Exception as e:
+    print(f"Error loading class names: {e}")
+    exit()
+
 
 # Paths to the model configuration and pre-trained weights
 configPath = 'ssd_mobilenet_v3_large_coco_2020_01_14.pbtxt'
@@ -22,7 +30,13 @@ weightsPath = 'frozen_inference_graph.pb'
 
 
 # Loading the pre-trained deep learning model using OpenCV's DNN module
-net = cv2.dnn_DetectionModel(weightsPath,configPath)
+try:
+    net = cv2.dnn_DetectionModel(weightsPath,configPath)
+    print("Successfully loaded DNN the model")
+except Exception as e:
+    print(f"Error loading the model: {e}")
+    exit()
+
 
 # Setting input parameters for the model (required for SSD MobileNet)
 net.setInputSize(320,320)   # Set input size for the model
@@ -62,7 +76,8 @@ def getObjects(img,draw=True,objects=[]):
 
             # If the detected object's name matches the list
             if className in objects:
-                objectInfo.append([box])
+                objectInfo.append([box, className])
+                print(f"Detected {className} with confidence {round(confidence * 100, 2)}%")
 
                 # If drawing is enabled, draw rectangle and labels
                 if (draw):
@@ -74,32 +89,105 @@ def getObjects(img,draw=True,objects=[]):
 
     return img,objectInfo  # Display confidence level
 
+#try connecting to arduino outside the main loop
+arduino = None
+try:
+    #Use COM port instead of /dev/ttyACM0 for windows
+    arduino = serial.Serial('COM3',9600)  # Adjust COM3 to your actual port
+    print ("Successfully connected to Arduino")
+    time.sleep(2) #wait for arduino to reset
+except Exception as e:
+    print(f"Error connecting to Arduino: {e}")
+    print ("Continuing without Arduino connection....")
+
 
 # Main function to capture video and perform live object detection
 if __name__ == '__main__':
     # Initialize webcam capture
-    cap = cv2.VideoCapture(0)
+    camera_indices = [0,1,2]
+    cap = None
+
+    for idx in camera_indices:
+        print(f"Trying to open camera with index {idx}....")
+        cap = cv2.VideoCapture(idx)
+        if cap.isOpened():
+            print(f"Successfully opened camera with index {idx}")
+            break
+        else:
+            print(f"Failed to open camera with index {idx}")
+
+    if cap is None or not cap.isOpened():
+        print("Failed to open camera")
+        exit()
 
     # Set the resolution of the video capture
     cap.set(3, 1280)  # Width
     cap.set(4, 720)   # Height
 
+    print("starting video capture loop...")
+
+    #List of objects to detect - expanding beyond just elephants
+    objects_to_detect = ['person','chair','bottle','laptop','elephant']
+    print(f"Looking for objects: {objects_to_detect}")
+
+
     # Infinite loop to continuously capture frames
-    while True:
-        success, img = cap.read()  # Read a frame from the webcam
+    frame_count = 0
+    try:
+        while True:
+            success, img = cap.read()  # Read a frame from the webcam
 
-        # Run object detection on the captured frame
-        results, objectInfo = getObjects(img, objects=['elephant'])  # Only look for 'elephant'
+            if not success:
+                print("Failed to capture frame")
+                break
 
-        # Display the detection results
-        cv2.imshow("Detection", img)
+            frame_count += 1
+            if frame_count % 30 == 0: #print every 30 frames to avoid console spam
+                print(f"Successfully captured frame {frame_count}")
 
-        # Exit loop if 'q' key is pressed
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
+            # Run object detection on the captured frame
+            results, objectInfo = getObjects(img, objects=objects_to_detect)
 
-    # Release the webcam and destroy all OpenCV windows
-    cap.release()
-    cv2.destroyAllWindows()
+            #if objects are detected and Arduino is connected, send data
+            if arduino and objectInfo:
+                try:
+                    arduino.write(b'1') #send byte '1' when object is detected
+                    print ("Sent '1' to Arduino (object detected).")
+
+                    #wait for arduino to reply with a timeout
+                    start_time = time.time()
+                    while arduino.in_waiting == 0:
+                        # Timeout after 0.5 seconds
+                        if time.time() - start_time > 0.5:
+                            print("No response from Arduino (timeout).")
+                            break
+                        time.sleep(0.01)
+
+                    if arduino.in_waiting > 0:
+                        response = arduino.readline().decode().rstrip()
+                        print(f"Arduino replied: {response}")
+                except Exception as e:
+                    print(f"Error communication with arduino: {e}")
+
+            #Display the detection results
+            cv2.imshow("Detection", img)
+
+            #Exit loop if 'q' key is pressed
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                print("Exiting loop...")
+                break
+
+
+    except Exception as e:
+        print(f"Error in main loop: {e}")
+    finally:
+        #Clean up resources
+        if cap is not None:
+            cap.release()
+        cv2.destroyAllWindows()
+        if arduino is not None:
+             arduino.close()
+        print("Resources released, program terminated.")
+
 
 
