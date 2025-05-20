@@ -1,10 +1,3 @@
-# Elephant Detection System with Alarm
-# ------------------------------------------------------------------------------
-# This script implements a computer vision system that detects elephants (and other
-# objects) using a pre-trained neural network model. When an elephant is detected,
-# the system activates an alarm (LED and buzzer) connected to a Raspberry Pi's GPIO pins.
-# ------------------------------------------------------------------------------
-
 # Import necessary libraries
 import cv2  # OpenCV library for computer vision tasks
 import numpy as np  # NumPy for numerical operations
