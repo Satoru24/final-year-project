@@ -1,251 +1,354 @@
-# Importing necessary libraries
-import cv2
-import numpy as np
-import serial
-import time
+# Elephant Detection System with Alarm
+# ------------------------------------------------------------------------------
+# This script implements a computer vision system that detects elephants (and other
+# objects) using a pre-trained neural network model. When an elephant is detected,
+# the system activates an alarm (LED and buzzer) connected to a Raspberry Pi's GPIO pins.
+# ------------------------------------------------------------------------------
 
-# Setting the detection threshold
-thres = 0.45  # Threshold to detect object (confidence level)
+# Import necessary libraries
+import cv2  # OpenCV library for computer vision tasks
+import numpy as np  # NumPy for numerical operations
+import time  # Time library for timing functions and delays
+import RPi.GPIO as GPIO  # Library to control Raspberry Pi GPIO pins
 
-# List to hold the class names from the COCO dataset
+# Define the confidence threshold for object detection
+# Any detection with confidence below this value will be ignored
+thres = 0.45  # 45% confidence threshold for object detection
+
+# Define GPIO pin assignments for the alarm components
+BUZZER_PIN = 2  # GPIO pin connected to the buzzer (BCM numbering)
+LED_PIN = 27  # GPIO pin connected to the LED indicator (BCM numbering)
+
+
+# Function to initialize and configure the GPIO pins
+def setup_gpio():
+    """
+    Set up the Raspberry Pi GPIO pins for the alarm system.
+    Returns True if successful, False otherwise.
+    """
+    try:
+        # Configure GPIO settings
+        GPIO.setmode(GPIO.BCM)  # Use Broadcom pin numbering scheme
+        GPIO.setwarnings(False)  # Disable warnings for already configured pins
+
+        # Set up pins as outputs
+        GPIO.setup(BUZZER_PIN, GPIO.OUT)  # Buzzer pin as output
+        GPIO.setup(LED_PIN, GPIO.OUT)  # LED pin as output
+
+        # Set initial states (everything off)
+        # Note: For active buzzers, HIGH typically means OFF
+        GPIO.output(BUZZER_PIN, GPIO.HIGH)  # Buzzer off
+        GPIO.output(LED_PIN, GPIO.LOW)  # LED off
+
+        # Note: The following code is commented out but would be used for passive buzzers
+        # Create PWM object for passive buzzer
+        # buzzer_pwm = GPIO.PWM(BUZZER_PIN, 1000)  # 1000 Hz frequency
+        # buzzer_pwm.start(0)  # Start with 0% duty cycle (off)
+
+        print("GPIO initialized successfully")
+
+        # Run a quick visual indicator sequence to show system is starting
+        for _ in range(3):  # Blink the LED 3 times
+            GPIO.output(LED_PIN, GPIO.HIGH)  # LED on
+            time.sleep(0.1)  # Wait 100ms
+            GPIO.output(LED_PIN, GPIO.LOW)  # LED off
+            time.sleep(0.1)  # Wait 100ms
+
+        # Quick buzzer test to confirm it's working
+        GPIO.output(BUZZER_PIN, GPIO.LOW)  # Turn buzzer on briefly
+        time.sleep(0.2)  # Sound for 200ms
+        GPIO.output(BUZZER_PIN, GPIO.HIGH)  # Turn buzzer off
+
+        return True  # GPIO setup successful
+
+    except Exception as e:
+        # If anything goes wrong during setup, report the error
+        print(f"Error setting up GPIO: {e}")
+        return False  # GPIO setup failed
+
+
+# Function to control the alarm system
+def control_alarm(state):
+    """
+    Control the alarm components (LED and buzzer) based on detection state.
+
+    Parameters:
+    state (bool): True to activate alarm, False to deactivate
+
+    Returns:
+    bool: True if operation was successful
+    """
+    if state:  # If activating the alarm
+        print("ALERT: Elephant detected!")
+        GPIO.output(LED_PIN, GPIO.HIGH)  # Turn on LED
+        # Note: Buzzer control is handled in the main loop for pulsing effect
+        return True
+    else:  # If deactivating the alarm
+        print("Alert cleared")
+        GPIO.output(LED_PIN, GPIO.LOW)  # Turn off LED
+        GPIO.output(BUZZER_PIN, GPIO.HIGH)  # Turn off buzzer
+        return True
+
+
+# Initialize empty list to hold class names from the COCO dataset
+# These are the object categories the model can detect
 classNames = []
 
-# Path to the file containing class labels (COCO dataset)
-classFile = 'coco.names'
+# Define the path to the file containing the class names
+classFile = 'coco.names'  # Standard COCO dataset labels file
 
-# Reading the class names from the file
+# Try to read the class names from the file
 try:
     with open(classFile, 'rt') as f:
+        # Read the file, removing trailing newlines and splitting by line
         classNames = f.read().rstrip('\n').split('\n')
     print(f"Successfully loaded {len(classNames)} class names from {classFile}")
 except Exception as e:
+    # If the file cannot be loaded, report the error and exit
     print(f"Error loading class names: {e}")
     exit()
 
-# Paths to the model configuration and pre-trained weights
-configPath = 'ssd_mobilenet_v3_large_coco_2020_01_14.pbtxt'
-weightsPath = 'frozen_inference_graph.pb'
+# Define paths to the model files
+# This uses a pre-trained SSD (Single Shot MultiBox Detector) with MobileNet backbone
+configPath = 'ssd_mobilenet_v3_large_coco_2020_01_14.pbtxt'  # Model configuration
+weightsPath = 'frozen_inference_graph.pb'  # Model weights
 
-# Loading the pre-trained deep learning model using OpenCV's DNN module
+# Load the pre-trained deep learning model using OpenCV's DNN module
 try:
+    # Create a detection model instance with the specified weights and config
     net = cv2.dnn_DetectionModel(weightsPath, configPath)
-    print("Successfully loaded DNN the model")
+    print("Successfully loaded DNN model")
 except Exception as e:
+    # If the model cannot be loaded, report the error and exit
     print(f"Error loading the model: {e}")
     exit()
 
-# Setting input parameters for the model (required for SSD MobileNet)
-net.setInputSize(320, 320)  # Set input size for the model
-net.setInputScale(1.0 / 127.5)  # Scale input pixels
-net.setInputMean((127.5, 127.5, 127.5))  # Normalize input by subtracting mean
-net.setInputSwapRB(True)  # Swap Red and Blue channels (OpenCV uses BGR by default)
+# Configure the neural network input parameters
+# These settings are specific to the SSD MobileNet model being used
+net.setInputSize(320, 320)  # Set input size to 320x320 pixels (model requirement)
+net.setInputScale(1.0 / 127.5)  # Scale input pixel values (normalize to [-1,1])
+net.setInputMean((127.5, 127.5, 127.5))  # Subtract mean values from each channel
+net.setInputSwapRB(True)  # Swap Red and Blue channels (OpenCV uses BGR, model expects RGB)
 
 
 # Function to detect objects in an image
 def getObjects(img, draw=True, objects=[]):
     """
-        Detects specified objects in the input image using the pre-trained model.
+    Detects specified objects in the input image using the pre-trained model.
 
-        Parameters:
-        img: The input image/frame
-        draw: Boolean flag to draw bounding boxes and labels
-        objects: List of specific objects to detect
+    Parameters:
+    img (numpy.ndarray): The input image/frame to process
+    draw (bool): Whether to draw bounding boxes and labels on the image
+    objects (list): List of specific object classes to detect (empty for all)
 
-        Returns:
-        img: Annotated image
-        objectInfo: List of detected objects' info (bounding box, etc.)
+    Returns:
+    tuple: (
+        img: Annotated image with bounding boxes if draw=True
+        objectInfo: List of detected objects with their bounding boxes
         detectedClasses: List of class names that were detected
-        """
+    )
+    """
 
-    # Perform object detection
+    # Run object detection on the image
+    # Returns class IDs, confidence scores, and bounding boxes
+    # nmsThreshold controls non-maximum suppression (removes overlapping boxes)
     classIds, confs, bbox = net.detect(img, confThreshold=thres, nmsThreshold=0.2)
 
-    # Default to detect all classes if specific objects are not specified
+    # If no specific objects are specified, detect all known classes
     if len(objects) == 0:
         objects = classNames
 
-    objectInfo = []  # Initialize empty list to store detected object info
-    detectedClasses = []  # Initialize empty list to store detected class names
+    objectInfo = []  # List to store information about detected objects
+    detectedClasses = []  # List to store names of detected classes
 
-    # If any objects are detected
+    # Process detection results if any objects were detected
     if len(classIds) != 0:
+        # Loop through each detected object
         for classId, confidence, box in zip(classIds.flatten(), confs.flatten(), bbox):
-            className = classNames[classId - 1]  # Get the class name from class ID
+            # Get the class name from the class ID (IDs start at 1, so subtract 1 for list index)
+            className = classNames[classId - 1]
 
-            # If the detected object's name matches the list
+            # Check if the detected class is in our target list
             if className in objects:
+                # Store the object's information (bounding box and class name)
                 objectInfo.append([box, className])
+                # Add the class name to the list of detected classes
                 detectedClasses.append(className)
+                # Print detection details
                 print(f"Detected {className} with confidence {round(confidence * 100, 2)}%")
 
-                # If drawing is enabled, draw rectangle and labels
-                if (draw):
-                    cv2.rectangle(img, box, color=(0, 255, 0), thickness=2)  # Draw bounding box
+                # If drawing is enabled, visualize the detection
+                if draw:
+                    # Draw a green rectangle around the object
+                    cv2.rectangle(img, box, color=(0, 255, 0), thickness=2)
+
+                    # Display the class name above the bounding box
                     cv2.putText(img, className.upper(), (box[0] + 10, box[1] + 30),
-                                cv2.FONT_HERSHEY_COMPLEX, 1, (0, 255, 0), 2)  # Display class name
+                                cv2.FONT_HERSHEY_COMPLEX, 1, (0, 255, 0), 2)
+
+                    # Display the confidence percentage
                     cv2.putText(img, str(round(confidence * 100, 2)), (box[0] + 200, box[1] + 30),
-                                cv2.FONT_HERSHEY_COMPLEX, 1, (0, 255, 0), 2)  # Display confidence level
+                                cv2.FONT_HERSHEY_COMPLEX, 1, (0, 255, 0), 2)
 
-    return img, objectInfo, detectedClasses  # Return image, object info, and detected classes
-
-
-# try connecting to arduino outside the main loop
-arduino = None
-try:
-    # Use COM port instead of /dev/ttyACM0 for windows
-    arduino = serial.Serial('COM3', 9600)  # Adjust COM3 to your actual port
-    print("Successfully connected to Arduino")
-    time.sleep(2)  # wait for arduino to reset
-
-    # Wait for Arduino's ready message
-    while arduino.in_waiting == 0:
-        time.sleep(0.1)
-
-    ready_message = arduino.readline().decode().strip()
-    print(f"Arduino says: {ready_message}")
-
-except Exception as e:
-    print(f"Error connecting to Arduino: {e}")
-    print("Continuing without Arduino connection....")
+    # Return the processed image and detection information
+    return img, objectInfo, detectedClasses
 
 
-# Function to send command to Arduino and get response
-def communicate_with_arduino(command):
-    if not arduino:
-        return False, "Arduino not connected"
-
-    try:
-        arduino.write(command.encode())
-        print(f"Sent '{command}' to Arduino.")
-
-        # Wait for arduino to reply with a timeout
-        start_time = time.time()
-        while arduino.in_waiting == 0:
-            # Timeout after 1 second
-            if time.time() - start_time > 1.0:
-                return False, "No response from Arduino (timeout)."
-            time.sleep(0.01)
-
-        response = arduino.readline().decode().strip()
-        print(f"Arduino replied: {response}")
-        return True, response
-    except Exception as e:
-        print(f"Error communicating with Arduino: {e}")
-        return False, str(e)
-
-
-# Main function to capture video and perform live object detection
+# Main function - program entry point
 if __name__ == '__main__':
-    # Initialize webcam capture
-    camera_indices = [0, 1, 2]
-    cap = None
+    # Initialize GPIO pins for the alarm system
+    gpio_ready = setup_gpio()
+    if not gpio_ready:
+        print("WARNING: GPIO initialization failed, continuing without alarm functionality")
 
+    # Initialize the camera/webcam
+    # Try several possible camera indices (0, 1, 2) to find the correct one
+    camera_indices = [0, 1, 2]
+    cap = None  # VideoCapture object
+
+    # Try each camera index until one works
     for idx in camera_indices:
         print(f"Trying to open camera with index {idx}....")
-        cap = cv2.VideoCapture(idx)
+        cap = cv2.VideoCapture(idx)  # Attempt to open camera
         if cap.isOpened():
             print(f"Successfully opened camera with index {idx}")
-            break
+            break  # Found a working camera, exit the loop
         else:
             print(f"Failed to open camera with index {idx}")
 
+    # If no camera could be opened, exit the program
     if cap is None or not cap.isOpened():
         print("Failed to open camera")
+        GPIO.cleanup()  # Clean up GPIO pins before exiting
         exit()
 
-    # Set the resolution of the video capture
-    cap.set(3, 1280)  # Width
-    cap.set(4, 720)  # Height
+    # Configure camera resolution
+    cap.set(3, 1280)  # Width: 1280 pixels
+    cap.set(4, 720)  # Height: 720 pixels (720p)
 
     print("Starting video capture loop...")
 
-    # List of objects to detect - expanding beyond just elephants
+    # Define list of objects to detect
+    # The model can detect many objects, but we're focusing on these
     objects_to_detect = ['person', 'chair', 'bottle', 'laptop', 'elephant']
-    priority_objects = ['elephant']  # Objects that should trigger the alarm
+
+    # Define priority objects that should trigger the alarm
+    # Currently only elephants will trigger the alarm
+    priority_objects = ['elephant']
+
     print(f"Looking for objects: {objects_to_detect}")
     print(f"Priority objects that trigger alarm: {priority_objects}")
 
-    # Variables to control alarm state
-    alarm_active = False
-    last_elephant_time = 0
-    elephant_timeout = 5  # Seconds to keep alarm on after elephant disappears
+    # Initialize variables for alarm state management
+    alarm_active = False  # Is the alarm currently active?
+    last_elephant_time = 0  # When was the last elephant detected?
+    elephant_timeout = 5  # How long to keep alarm on after detection stops (seconds)
 
-    # Infinite loop to continuously capture frames
-    frame_count = 0
+    # Variables for non-blocking buzzer pattern (pulsing effect)
+    last_buzzer_toggle = 0  # When was the buzzer last toggled?
+    buzzer_state = False  # Is the buzzer currently on?
+    buzzer_interval = 0.4  # Toggle interval in seconds (controls pulse rate)
+
+    # Main processing loop
+    frame_count = 0  # Counter for processed frames
     try:
+        # Run indefinitely until interrupted
         while True:
-            success, img = cap.read()  # Read a frame from the webcam
+            # Capture a frame from the camera
+            success, img = cap.read()
 
+            # If frame capture failed, exit the loop
             if not success:
                 print("Failed to capture frame")
                 break
 
+            # Increment frame counter
             frame_count += 1
-            if frame_count % 30 == 0:  # Print every 30 frames to avoid console spam
+
+            # Print status message every 30 frames to avoid console spam
+            if frame_count % 30 == 0:
                 print(f"Successfully captured frame {frame_count}")
 
-            # Run object detection on the captured frame
+            # Process the captured frame to detect objects
             results, objectInfo, detectedClasses = getObjects(img, objects=objects_to_detect)
 
-            # Check if priority objects were detected
+            # Check if any priority objects (elephants) were detected
             priority_detected = any(obj in priority_objects for obj in detectedClasses)
 
-            # Display the objects detected on the window
+            # Display the list of detected objects on the image
             objText = f"Objects: {', '.join(detectedClasses) if detectedClasses else 'None'}"
             cv2.putText(img, objText, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
-            # Alarm state management
+            # Get current time for alarm management
             current_time = time.time()
 
-            # If a priority object is detected
+            # Handle alarm activation when priority object is detected
             if priority_detected:
+                # Update the last detection time
                 last_elephant_time = current_time
 
                 # If alarm is not already active, activate it
-                if not alarm_active and arduino:
-                    success, response = communicate_with_arduino('1')
-                    if success:
+                if not alarm_active and gpio_ready:
+                    if control_alarm(True):
                         alarm_active = True
+                        # Display alarm status on the image
                         cv2.putText(img, "ALARM ACTIVE!", (10, 70), cv2.FONT_HERSHEY_SIMPLEX,
                                     1, (0, 0, 255), 3)
 
-            # If no priority object is detected but alarm is still active
+            # Handle alarm deactivation after timeout period
             elif alarm_active and current_time - last_elephant_time > elephant_timeout:
-                # Deactivate alarm after timeout
-                if arduino:
-                    success, response = communicate_with_arduino('0')
-                    if success:
+                # Deactivate alarm after timeout period
+                if gpio_ready:
+                    if control_alarm(False):
                         alarm_active = False
 
-            # Update alarm status on image
+            # Create pulsing buzzer pattern when alarm is active
+            if alarm_active and gpio_ready:
+                # Check if it's time to toggle the buzzer state
+                if current_time - last_buzzer_toggle >= buzzer_interval:
+                    # Toggle the buzzer state (on->off or off->on)
+                    buzzer_state = not buzzer_state
+                    # For active buzzers: LOW is ON, HIGH is OFF
+                    GPIO.output(BUZZER_PIN, buzzer_state)
+                    # Update the last toggle time
+                    last_buzzer_toggle = current_time
+
+            # Display alarm status on the image if active
             if alarm_active:
                 cv2.putText(img, "ALARM ACTIVE!", (10, 70), cv2.FONT_HERSHEY_SIMPLEX,
                             1, (0, 0, 255), 3)
 
-            # Display the detection results
+            # Display the processed image with detection results
             cv2.imshow("Elephant Detection System", img)
 
-            # Exit loop if 'q' key is pressed
+            # Check for key press - exit if 'q' is pressed
+            # waitKey(1) waits 1ms between frames, needed for UI updates
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 print("Exiting loop...")
                 # Turn off alarm before exiting
-                if alarm_active and arduino:
-                    communicate_with_arduino('0')
+                if alarm_active and gpio_ready:
+                    control_alarm(False)
                 break
 
+    # Handle unexpected errors
     except Exception as e:
         print(f"Error in main loop: {e}")
+
+    # Cleanup code that runs regardless of how the loop exits
     finally:
-        # Clean up resources
+        # Release the camera resource
         if cap is not None:
             cap.release()
+
+        # Close all OpenCV windows
         cv2.destroyAllWindows()
-        if arduino is not None:
-            # Turn off alarm before closing
+
+        # Clean up GPIO pins to prevent issues with future programs
+        if gpio_ready:
+            # Ensure alarm is off
             if alarm_active:
-                communicate_with_arduino('0')
-            arduino.close()
+                control_alarm(False)
+            # Release GPIO resources
+            GPIO.cleanup()
+
         print("Resources released, program terminated.")
-
-
-
